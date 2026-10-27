@@ -203,8 +203,17 @@ header{display:flex;align-items:center;justify-content:space-between;gap:12px;fl
     <div class="note">Tus datos se guardan solo en este teléfono, en Safari. Nadie más los ve, ni siquiera quien te pasó la app. Descargá una copia de respaldo de vez en cuando, sobre todo antes de borrar datos de Safari o cambiar de teléfono.</div>
     <div class="actions"><button type="button" class="btn ghost" id="exp">Descargar respaldo</button><button type="button" class="btn ghost" id="impBtn">Restaurar respaldo</button></div>
     <input type="file" id="imp" accept="application/json,.json" hidden>
+    <h2 style="margin-top:8px">Pasar mis datos a Safari</h2>
+    <p class="muted" style="margin:0">El atajo de Apple Pay siempre abre Chanchito en <b>Safari</b>, y Safari guarda sus datos aparte del ícono de inicio. Para tener todo junto: en el Chanchito donde están tus datos tocá <b>Copiar mis datos</b>; después abrí Chanchito en Safari y tocá <b>Pegar datos</b>. Se suman a lo que ya haya, sin duplicar nada.</p>
+    <div class="actions"><button type="button" class="btn ghost" id="cpData">Copiar mis datos</button><button type="button" class="btn primary" id="psData">Pegar datos</button></div>
+    <div id="pasteBox" hidden style="margin-top:8px">
+      <p class="muted" style="margin:0 0 6px">Mantené presionado el cuadro, tocá <b>Pegar</b> y luego <b>Agregar</b>.</p>
+      <textarea id="pasteTxt" rows="3" style="width:100%;font:inherit;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--surface);color:var(--ink)"></textarea>
+      <div class="actions"><button type="button" class="btn primary" id="pasteOk">Agregar</button></div>
+    </div>
+    <p class="muted" id="whereNote" style="margin:6px 0 0;font-size:.85rem"></p>
     <h2 style="margin-top:8px">Agregar a la pantalla de inicio</h2>
-    <p class="muted" style="margin:0">En Safari tocá el botón Compartir → <b>Agregar a inicio</b>. La app queda con su ícono y funciona sin internet.</p>
+    <p class="muted" style="margin:0">Para que los pagos de Apple Pay y tus demás movimientos queden juntos, usá Chanchito <b>en Safari</b>. Guardala en Favoritos (Compartir → <b>Agregar a favoritos</b>) para abrirla rápido. Si la agregás a la pantalla de inicio, ese ícono guarda datos aparte.</p>
   </section>
 </div>
 
@@ -352,15 +361,38 @@ async function runRecurrings(){
 }
 
 /* ---------- Apple Pay ---------- */
+// Entiende ₡12 500,00 · 12.500 · 12,500.00 · 12500.00 · CRC 1 234 567,5 · 12\n500,00
+function parseAmount(t){
+  let x=String(t==null?"":t).replace(/[^0-9.,]/g,"");
+  if(!/\d/.test(x))return NaN;
+  x=x.replace(/^[.,]+|[.,]+$/g,"");
+  const lc=x.lastIndexOf(","),ld=x.lastIndexOf(".");
+  if(lc>=0&&ld>=0){
+    const dec=lc>ld?",":".",th=dec===","?".":",";
+    x=x.split(th).join("").replace(dec,".");
+  }else if(lc>=0||ld>=0){
+    const sep=lc>=0?",":".",n=x.split(sep).length-1,after=x.length-x.lastIndexOf(sep)-1;
+    if(n>1||after===3)x=x.split(sep).join("");
+    else x=x.replace(sep,".");
+  }
+  const v=parseFloat(x);
+  return isFinite(v)?Math.round(v*100)/100:NaN;
+}
 function guessCat(m){for(const[re,c]of AUTO)if(re.test(m))return c;return "Otros"}
 async function handleApplePay(){
   const h=(location.hash||"").replace(/^#/,"");
   if(!h.startsWith("ap~"))return;
   try{history.replaceState(null,"",location.pathname+location.search)}catch(e){}
-  const parts=h.split("~");
-  const nonce=parts[1]||"";const amount=parseFloat((parts[2]||"").replace(/[^0-9.]/g,""));
-  const merchant=(parts.slice(3).join(" ")||"Compra").replace(/_+/g," ").trim()||"Compra";
-  if(!(amount>0)){toast("No se pudo leer el monto del pago. Revisá el paso 2 del atajo.");return}
+  let raw=h;try{raw=decodeURIComponent(h)}catch(e){}
+  const parts=raw.split("~");
+  const nonce=(parts[1]||"").replace(/\D/g,"");
+  let amount=parseAmount(parts[2]),mIdx=3;
+  if(!(amount>0)){
+    // por si el monto y el comercio llegaron intercambiados
+    for(let i=3;i<parts.length;i++){const a=parseAmount(parts[i]);if(a>0&&/^[\s\d.,₡$¢CRCUSD-]+$/i.test(parts[i])){amount=a;parts.splice(i,1);mIdx=2;break}}
+  }
+  const merchant=(parts.slice(mIdx).join(" ")||"Compra").replace(/_+/g," ").replace(/\s+/g," ").trim()||"Compra";
+  if(!(amount>0)){toast("No se pudo leer el monto del pago. Llegó: «"+((parts[2]||"").trim()||"vacío")+"». Revisá el paso del monto en el atajo.");return}
   settings.processed=settings.processed||[];
   if(nonce&&settings.processed.includes(nonce))return;
   let date=today();
@@ -520,6 +552,63 @@ $("exp").onclick=()=>{
   document.body.appendChild(a);a.click();a.remove();toast("Respaldo descargado");
 };
 $("impBtn").onclick=()=>$("imp").click();
+
+/* pasar datos entre el ícono y Safari */
+function collectData(){
+  const data={app:"chanchito",v:1,exported:new Date().toISOString(),settings,months:{}};
+  try{for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(k.startsWith("fin:m-"))data.months[k.slice(6)]=JSON.parse(localStorage.getItem(k)).items}}catch(e){}
+  return data;
+}
+async function mergeData(d){
+  if(!d||(d.app!=="chanchito"&&d.app!=="mis-finanzas"))throw 0;
+  let added=0;
+  for(const k of Object.keys(d.months||{})){
+    await serial(async()=>{
+      const cur=await store.getMonth(k);const ids=new Set(cur.map(t=>t.id));
+      const extra=(d.months[k]||[]).filter(t=>t&&t.id&&!ids.has(t.id));
+      added+=extra.length;
+      if(extra.length)await store.saveMonth(k,cur.concat(extra));
+    });
+  }
+  const ds=d.settings||{};
+  const rids=new Set(settings.recurrings.map(r=>r.id));
+  for(const r of ds.recurrings||[]){
+    const mine=settings.recurrings.find(x=>x.id===r.id);
+    if(!mine)settings.recurrings.push(r);
+    else if(r.next>mine.next)mine.next=r.next; // evita registrar dos veces
+  }
+  settings.processed=[...new Set([...(settings.processed||[]),...(ds.processed||[])])].slice(0,40);
+  await saveSettings();
+  watch();
+  return added;
+}
+$("cpData").onclick=async()=>{
+  const txt="CHANCHITO:"+btoa(unescape(encodeURIComponent(JSON.stringify(collectData()))));
+  try{await navigator.clipboard.writeText(txt);toast("Datos copiados. Ahora abrí Chanchito en Safari y tocá Pegar datos.")}
+  catch(e){$("pasteBox").hidden=false;$("pasteTxt").value=txt;$("pasteTxt").select();toast("Copiá el texto del cuadro")}
+};
+async function pasteFrom(txt){
+  try{
+    txt=(txt||"").trim();
+    const d=txt.startsWith("CHANCHITO:")?JSON.parse(decodeURIComponent(escape(atob(txt.slice(10))))):JSON.parse(txt);
+    const n=await mergeData(d);
+    $("pasteBox").hidden=true;$("pasteTxt").value="";
+    toast(n?("Listo: se "+(n===1?"agregó 1 movimiento":"agregaron "+n+" movimientos")+" y tus recurrentes."):"Listo: tus recurrentes y ajustes quedaron al día.");
+  }catch(e){toast("Eso no parece copiado desde Chanchito. Tocá Copiar mis datos de nuevo.")}
+}
+$("psData").onclick=async()=>{
+  let txt="";
+  try{txt=await navigator.clipboard.readText()}catch(e){}
+  if(txt&&txt.trim().startsWith("CHANCHITO:"))return pasteFrom(txt);
+  $("pasteBox").hidden=false;$("pasteTxt").focus();
+};
+$("pasteOk").onclick=()=>pasteFrom($("pasteTxt").value);
+(function(){
+  const standalone=window.navigator.standalone||matchMedia("(display-mode: standalone)").matches;
+  $("whereNote").textContent=standalone
+    ?"Ahora estás en el Chanchito del ícono de inicio. Los pagos de Apple Pay no llegan acá."
+    :"Ahora estás en Chanchito en Safari. Aquí llegan los pagos de Apple Pay.";
+})();
 $("imp").onchange=async()=>{
   const f=$("imp").files[0];if(!f)return;
   try{
